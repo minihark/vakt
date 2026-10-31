@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { X, Bell, Webhook, Mail, CheckCircle2, AlertTriangle, Send, ShieldCheck, Key, RefreshCw } from 'lucide-react';
+import { X, Bell, Webhook, Mail, CheckCircle2, AlertTriangle, Send, ShieldCheck, Key, RefreshCw, MessageSquare } from 'lucide-react';
 import { AlertSettings, AlertLog } from '../types';
 import { playClick, playAlertSent } from '../utils/audio';
 
@@ -13,10 +13,14 @@ export const AlertSettingsDrawer: React.FC<AlertSettingsDrawerProps> = ({ isOpen
     webhookUrl: '',
     alertEmail: '',
     resendApiKeyConfigured: false,
+    telegramChatId: '',
+    telegramConfigured: false,
+    notifyTelegram: true,
     notifyOnDown: true,
     notifyOnRecovery: true,
   });
   const [resendApiKeyInput, setResendApiKeyInput] = useState('');
+  const [telegramBotTokenInput, setTelegramBotTokenInput] = useState('');
   const [logs, setLogs] = useState<AlertLog[]>([]);
   const [isSaving, setIsSaving] = useState(false);
   const [isTesting, setIsTesting] = useState(false);
@@ -65,12 +69,18 @@ export const AlertSettingsDrawer: React.FC<AlertSettingsDrawerProps> = ({ isOpen
       const payload: Record<string, unknown> = {
         webhookUrl: settings.webhookUrl.trim(),
         alertEmail: settings.alertEmail.trim(),
+        telegramChatId: settings.telegramChatId.trim(),
+        notifyTelegram: settings.notifyTelegram,
         notifyOnDown: settings.notifyOnDown,
         notifyOnRecovery: settings.notifyOnRecovery,
       };
 
       if (resendApiKeyInput.trim()) {
         payload.resendApiKey = resendApiKeyInput.trim();
+      }
+
+      if (telegramBotTokenInput.trim()) {
+        payload.telegramBotToken = telegramBotTokenInput.trim();
       }
 
       const res = await fetch('/api/settings', {
@@ -83,6 +93,7 @@ export const AlertSettingsDrawer: React.FC<AlertSettingsDrawerProps> = ({ isOpen
         const updated = await res.json();
         setSettings(updated.settings);
         setResendApiKeyInput('');
+        setTelegramBotTokenInput('');
         setSaveSuccess(true);
         setTimeout(() => setSaveSuccess(false), 3000);
       }
@@ -220,6 +231,64 @@ export const AlertSettingsDrawer: React.FC<AlertSettingsDrawerProps> = ({ isOpen
               <p className="text-[11px] text-zinc-500">
                 Skickar formaterade HTML incident-kort via Resend REST API med exakt JSON fel-payload.
               </p>
+            </div>
+
+            {/* Telegram Bot Notification */}
+            <div className="space-y-3 pt-2 border-t border-[#21262d]">
+              <div className="flex items-center justify-between">
+                <label className="text-xs font-semibold text-zinc-300 flex items-center gap-2">
+                  <MessageSquare className="w-4 h-4 text-sky-400" />
+                  Telegram Bot Direkt-avisering
+                </label>
+                {settings.telegramConfigured && (
+                  <span className="text-[10px] text-sky-400 font-mono flex items-center gap-1 bg-sky-950/60 border border-sky-500/30 px-2 py-0.5 rounded">
+                    <CheckCircle2 className="w-3 h-3" /> Bot Aktiv
+                  </span>
+                )}
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-[11px] text-zinc-400 font-mono">Telegram Chat ID</label>
+                <input
+                  type="text"
+                  value={settings.telegramChatId}
+                  onChange={(e) => setSettings({ ...settings, telegramChatId: e.target.value })}
+                  placeholder="7684080020"
+                  className="w-full bg-[#161b22] border border-[#30363d] rounded-lg px-3.5 py-2.5 text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-sky-500 font-mono transition-colors"
+                />
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-[11px] text-zinc-400 font-mono">Telegram Bot Token (Valfritt eget token)</label>
+                <input
+                  type="password"
+                  value={telegramBotTokenInput}
+                  onChange={(e) => setTelegramBotTokenInput(e.target.value)}
+                  placeholder={settings.telegramConfigured ? '•••••••••••••••• (Standard Harkco Sentinel Bot)' : '8917459869:AA...'}
+                  className="w-full bg-[#161b22] border border-[#30363d] rounded-lg px-3.5 py-2.5 text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-sky-500 font-mono transition-colors"
+                />
+                <p className="text-[11px] text-zinc-500">
+                  Levererar realtids-incidenter med JSON-felutdrag direkt i din privata Telegram-chatt.
+                </p>
+              </div>
+
+              <label className="flex items-start gap-3 p-3 rounded-lg bg-[#161b22] border border-[#30363d] cursor-pointer hover:border-zinc-600 transition-colors">
+                <input
+                  type="checkbox"
+                  checked={settings.notifyTelegram}
+                  onChange={(e) => setSettings({ ...settings, notifyTelegram: e.target.checked })}
+                  className="mt-0.5 rounded border-[#30363d] text-sky-500 focus:ring-0 bg-[#0d1117]"
+                />
+                <div className="flex-1">
+                  <div className="text-xs font-medium text-white flex items-center gap-2">
+                    Skicka Larm till Telegram
+                    <span className="w-2 h-2 rounded-full bg-sky-400"></span>
+                  </div>
+                  <p className="text-[11px] text-zinc-400 mt-0.5">
+                    Skicka snabba meddelanden med direktlänk och driftstoppstid till Telegram-chatten.
+                  </p>
+                </div>
+              </label>
             </div>
 
             {/* Trigger Options */}
@@ -360,7 +429,13 @@ export const AlertSettingsDrawer: React.FC<AlertSettingsDrawerProps> = ({ isOpen
                           }`}
                         />
                         <span className="font-semibold text-zinc-200">{log.monitor_name}</span>
-                        <span className="text-[10px] text-zinc-500 px-1.5 py-0.2 bg-zinc-800 rounded">
+                        <span className={`text-[10px] px-1.5 py-0.5 rounded font-mono border ${
+                          log.channel === 'telegram'
+                            ? 'bg-sky-950/70 text-sky-300 border-sky-500/30'
+                            : log.channel === 'webhook'
+                            ? 'bg-emerald-950/70 text-emerald-300 border-emerald-500/30'
+                            : 'bg-purple-950/70 text-purple-300 border-purple-500/30'
+                        }`}>
                           {log.channel}
                         </span>
                       </div>

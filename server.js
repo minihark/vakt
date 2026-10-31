@@ -151,6 +151,9 @@ function getAlertSettings() {
     webhookUrl: map.webhook_url || process.env.VAKT_WEBHOOK_URL || '',
     alertEmail: map.alert_email || process.env.VAKT_ALERT_EMAIL || 'viktor@harkco.se',
     resendApiKey: map.resend_api_key || process.env.RESEND_API_KEY || '',
+    telegramBotToken: map.telegram_bot_token || process.env.TELEGRAM_BOT_TOKEN || '8917459869:AAHkiYclgnCJoOjBJ2n65bTOGICcnSpwG3o',
+    telegramChatId: map.telegram_chat_id || process.env.TELEGRAM_CHAT_ID || '7684080020',
+    notifyTelegram: map.notify_telegram !== 'false',
     notifyOnDown: map.notify_on_down !== 'false',
     notifyOnRecovery: map.notify_on_recovery !== 'false',
   };
@@ -354,6 +357,62 @@ async function dispatchAlert(event, data) {
       const logId = `al-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
       stmtInsertAlertLog.run(logId, event, monitorName, 'email', 'error', err.message, timestamp);
       results.push({ channel: 'email', status: 'error', error: err.message });
+    }
+  }
+
+  // 3. Dispatch Telegram via Bot API
+  if (settings.notifyTelegram && settings.telegramBotToken && settings.telegramChatId) {
+    try {
+      let telegramText = '';
+      if (event === 'incident_opened') {
+        telegramText =
+          `🚨 <b>[VAKT LARM] ${escapeHtml(monitorName)} ligger NERE</b>\n\n` +
+          `🔗 <b>URL:</b> <code>${escapeHtml(monitorUrl)}</code>\n` +
+          `📊 <b>Status:</b> <code>HTTP ${statusCode}</code>\n` +
+          `⚡ <b>Latens:</b> <code>${data.latencyMs || 0} ms</code>\n` +
+          `⏱ <b>Tid:</b> <code>${timestamp}</code>\n\n` +
+          (data.errorPayload
+            ? `<b>Fel-payload (JSON):</b>\n<pre>${escapeHtml(data.errorPayload.slice(0, 500))}</pre>`
+            : `<i>${escapeHtml(data.errorMsg || 'HTTP-anrop misslyckades')}</i>`);
+      } else if (event === 'incident_resolved') {
+        telegramText =
+          `✅ <b>[VAKT LÖST] ${escapeHtml(monitorName)} är ÅTERSTÄLLD</b>\n\n` +
+          `🔗 <b>URL:</b> <code>${escapeHtml(monitorUrl)}</code>\n` +
+          `⏱ <b>Total driftstörning:</b> <b>${data.durationSec || 0} sekunder</b>\n` +
+          `⚡ <b>Svarstid nu:</b> <code>HTTP 200 (${data.latencyMs || 0} ms)</code>\n` +
+          `🛡️ <i>Flottan är åter i normal drift.</i>`;
+      } else {
+        telegramText =
+          `🛡️ <b>[VAKT TEST] Flottans väktare är aktiv</b>\n\n` +
+          `Alla 11 Harkco Daily Apps övervakas med 45s radar-svep.\n` +
+          `⚡ Latens: <code>${data.latencyMs || 18} ms</code>\n` +
+          `✅ Telegram-avisering fungerar optimalt!`;
+      }
+
+      const tgUrl = `https://api.telegram.org/bot${settings.telegramBotToken}/sendMessage`;
+      const res = await fetch(tgUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: settings.telegramChatId,
+          text: telegramText,
+          parse_mode: 'HTML',
+          disable_web_page_preview: true,
+        }),
+        signal: AbortSignal.timeout(6000),
+      });
+
+      const resJson = await res.json().catch(() => ({}));
+      const logId = `al-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+      const statusText = res.ok && resJson.ok ? 'delivered' : `failed (${res.status})`;
+      stmtInsertAlertLog.run(logId, event, monitorName, 'telegram', statusText, resJson.description || `HTTP ${res.status}`, timestamp);
+      results.push({ channel: 'telegram', status: statusText });
+      console.log(`[Vakt Alert] Telegram alert dispatched -> ${statusText}`);
+    } catch (err) {
+      console.error('[Vakt Alert] Telegram error:', err.message);
+      const logId = `al-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+      stmtInsertAlertLog.run(logId, event, monitorName, 'telegram', 'error', err.message, timestamp);
+      results.push({ channel: 'telegram', status: 'error', error: err.message });
     }
   }
 
@@ -657,6 +716,9 @@ const server = http.createServer(async (req, res) => {
       webhookUrl: s.webhookUrl,
       alertEmail: s.alertEmail,
       resendApiKeyConfigured: Boolean(s.resendApiKey),
+      telegramChatId: s.telegramChatId,
+      telegramConfigured: Boolean(s.telegramBotToken && s.telegramChatId),
+      notifyTelegram: s.notifyTelegram,
       notifyOnDown: s.notifyOnDown,
       notifyOnRecovery: s.notifyOnRecovery,
     }));
@@ -676,6 +738,15 @@ const server = http.createServer(async (req, res) => {
       if (typeof body.resendApiKey === 'string' && body.resendApiKey.trim()) {
         stmtSetSetting.run('resend_api_key', body.resendApiKey.trim());
       }
+      if (typeof body.telegramBotToken === 'string' && body.telegramBotToken.trim()) {
+        stmtSetSetting.run('telegram_bot_token', body.telegramBotToken.trim());
+      }
+      if (typeof body.telegramChatId === 'string') {
+        stmtSetSetting.run('telegram_chat_id', body.telegramChatId.trim());
+      }
+      if (typeof body.notifyTelegram === 'boolean') {
+        stmtSetSetting.run('notify_telegram', body.notifyTelegram ? 'true' : 'false');
+      }
       if (typeof body.notifyOnDown === 'boolean') {
         stmtSetSetting.run('notify_on_down', body.notifyOnDown ? 'true' : 'false');
       }
@@ -691,6 +762,9 @@ const server = http.createServer(async (req, res) => {
           webhookUrl: updated.webhookUrl,
           alertEmail: updated.alertEmail,
           resendApiKeyConfigured: Boolean(updated.resendApiKey),
+          telegramChatId: updated.telegramChatId,
+          telegramConfigured: Boolean(updated.telegramBotToken && updated.telegramChatId),
+          notifyTelegram: updated.notifyTelegram,
           notifyOnDown: updated.notifyOnDown,
           notifyOnRecovery: updated.notifyOnRecovery,
         },

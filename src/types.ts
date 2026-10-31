@@ -47,6 +47,9 @@ export interface AlertSettings {
   webhookUrl: string;
   alertEmail: string;
   resendApiKeyConfigured: boolean;
+  telegramChatId: string;
+  telegramConfigured: boolean;
+  notifyTelegram: boolean;
   notifyOnDown: boolean;
   notifyOnRecovery: boolean;
 }
