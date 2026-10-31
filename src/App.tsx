@@ -6,6 +6,7 @@ import { MonitorCard } from './components/MonitorCard';
 import { JsonInspectorDrawer } from './components/JsonInspectorDrawer';
 import { AddMonitorModal } from './components/AddMonitorModal';
 import { ProUpgradeModal } from './components/ProUpgradeModal';
+import { AlertSettingsDrawer } from './components/AlertSettingsDrawer';
 import { playSonarPing, playIncidentAlarm, setAudioMuted } from './utils/audio';
 import { History } from 'lucide-react';
 
@@ -19,6 +20,7 @@ export const App: React.FC = () => {
   });
 
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
+  const [isAlertsDrawerOpen, setIsAlertsDrawerOpen] = useState(false);
   const [isProModalOpen, setIsProModalOpen] = useState(false);
   const [inspectorMonitor, setInspectorMonitor] = useState<Monitor | null>(null);
 
@@ -150,6 +152,7 @@ export const App: React.FC = () => {
         isMuted={isMuted}
         onToggleMute={handleToggleMute}
         onOpenAddModal={() => setIsAddModalOpen(true)}
+        onOpenAlertsDrawer={() => setIsAlertsDrawerOpen(true)}
         onOpenProModal={() => setIsProModalOpen(true)}
         isPro={isPro}
         incidentCount={fleetStats.incidentCount}
@@ -233,6 +236,12 @@ export const App: React.FC = () => {
       <JsonInspectorDrawer
         monitor={inspectorMonitor}
         onClose={() => setInspectorMonitor(null)}
+      />
+
+      {/* Alert Settings Drawer */}
+      <AlertSettingsDrawer
+        isOpen={isAlertsDrawerOpen}
+        onClose={() => setIsAlertsDrawerOpen(false)}
       />
 
       {/* Add Monitor Modal */}

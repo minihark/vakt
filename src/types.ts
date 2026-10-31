@@ -42,3 +42,21 @@ export interface FleetStats {
   overallUptimePercent: number;
   lastGlobalProbe: string;
 }
+
+export interface AlertSettings {
+  webhookUrl: string;
+  alertEmail: string;
+  resendApiKeyConfigured: boolean;
+  notifyOnDown: boolean;
+  notifyOnRecovery: boolean;
+}
+
+export interface AlertLog {
+  id: string;
+  event: string;
+  monitor_name: string;
+  channel: string;
+  status: string;
+  details: string | null;
+  dispatched_at: string;
+}

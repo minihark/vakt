@@ -46,6 +46,21 @@ db.exec(`
     resolved_at TEXT,
     duration_sec REAL
   );
+
+  CREATE TABLE IF NOT EXISTS alert_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS alert_logs (
+    id TEXT PRIMARY KEY,
+    event TEXT NOT NULL,
+    monitor_name TEXT NOT NULL,
+    channel TEXT NOT NULL,
+    status TEXT NOT NULL,
+    details TEXT,
+    dispatched_at TEXT NOT NULL
+  );
 `);
 
 // Seed default Harkco fleet if empty
@@ -114,6 +129,237 @@ const stmtInsertMonitor = db.prepare(`
 const stmtDeleteMonitor = db.prepare('DELETE FROM monitors WHERE id = ?');
 const stmtDeleteMonitorHistory = db.prepare('DELETE FROM probe_history WHERE monitor_id = ?');
 
+// Alerting Prepared Statements
+const stmtGetAllSettings = db.prepare('SELECT key, value FROM alert_settings');
+const stmtSetSetting = db.prepare(`
+  INSERT INTO alert_settings (key, value) VALUES (?, ?)
+  ON CONFLICT(key) DO UPDATE SET value = excluded.value
+`);
+const stmtInsertAlertLog = db.prepare(`
+  INSERT INTO alert_logs (id, event, monitor_name, channel, status, details, dispatched_at)
+  VALUES (?, ?, ?, ?, ?, ?, ?)
+`);
+const stmtGetRecentAlertLogs = db.prepare('SELECT * FROM alert_logs ORDER BY dispatched_at DESC LIMIT 25');
+
+function getAlertSettings() {
+  const rows = stmtGetAllSettings.all();
+  const map = {};
+  for (const r of rows) {
+    map[r.key] = r.value;
+  }
+  return {
+    webhookUrl: map.webhook_url || process.env.VAKT_WEBHOOK_URL || '',
+    alertEmail: map.alert_email || process.env.VAKT_ALERT_EMAIL || 'viktor@harkco.se',
+    resendApiKey: map.resend_api_key || process.env.RESEND_API_KEY || '',
+    notifyOnDown: map.notify_on_down !== 'false',
+    notifyOnRecovery: map.notify_on_recovery !== 'false',
+  };
+}
+
+function escapeHtml(str) {
+  if (!str) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
+function buildAlertHtml({ event, monitorName, url, statusCode, errorMsg, errorPayload, durationSec, latencyMs, timestamp }) {
+  const isDown = event === 'incident_opened';
+  const isResolved = event === 'incident_resolved';
+  const badgeColor = isDown ? '#EF4444' : (isResolved ? '#10B981' : '#3B82F6');
+  const badgeText = isDown ? 'INCIDENT DETECTED' : (isResolved ? 'SERVICE RECOVERED' : 'TEST ALERT');
+  const title = isDown
+    ? `${monitorName} is DOWN (HTTP ${statusCode})`
+    : (isResolved ? `${monitorName} is back UP` : `Vakt Test Alert: All Systems Operational`);
+
+  let detailsBlock = '';
+  if (isDown) {
+    detailsBlock = `
+      <div style="margin-top: 16px; padding: 12px; background: #0d1117; border: 1px solid #30363d; border-radius: 6px;">
+        <div style="font-size: 12px; color: #8b949e; text-transform: uppercase; font-family: monospace;">Error Details</div>
+        <div style="color: #f85149; font-weight: 600; margin-top: 4px; font-family: monospace;">${escapeHtml(errorMsg || 'HTTP check failed')}</div>
+        ${errorPayload ? `
+          <div style="margin-top: 8px; font-size: 11px; color: #8b949e;">Response Body (JSON):</div>
+          <pre style="margin-top: 4px; padding: 8px; background: #161b22; border-radius: 4px; color: #c9d1d9; font-size: 11px; overflow-x: auto; white-space: pre-wrap; font-family: monospace;">${escapeHtml(errorPayload.slice(0, 1000))}</pre>
+        ` : ''}
+      </div>
+    `;
+  } else if (isResolved) {
+    detailsBlock = `
+      <div style="margin-top: 16px; padding: 12px; background: #042617; border: 1px solid #10B981; border-radius: 6px;">
+        <div style="font-size: 12px; color: #6ee7b7; font-family: monospace;">RECOVERY TIME</div>
+        <div style="color: #ffffff; font-size: 20px; font-weight: bold; margin-top: 2px;">${durationSec || 0} seconds</div>
+        <div style="color: #a7f3d0; font-size: 12px; margin-top: 4px;">Service returned HTTP 200 OK (${latencyMs || 0}ms latency).</div>
+      </div>
+    `;
+  }
+
+  return `
+    <!DOCTYPE html>
+    <html>
+    <head><meta charset="utf-8"></head>
+    <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0c1017; color: #f0f6fc; padding: 24px; margin: 0;">
+      <div style="max-width: 580px; margin: 0 auto; background: #161b22; border: 1px solid #30363d; border-radius: 12px; overflow: hidden; box-shadow: 0 10px 30px rgba(0,0,0,0.5);">
+        <div style="padding: 20px 24px; border-bottom: 1px solid #21262d; display: flex; align-items: center; justify-content: space-between;">
+          <div style="font-size: 18px; font-weight: bold; letter-spacing: -0.02em; color: #f0f6fc;">
+            🛡️ <span style="color: #10B981;">Harkco</span> Vakt
+          </div>
+          <div style="display: inline-block; padding: 4px 10px; border-radius: 9999px; font-size: 11px; font-weight: 700; background: ${badgeColor}22; color: ${badgeColor}; border: 1px solid ${badgeColor}44; text-transform: uppercase;">
+            ${badgeText}
+          </div>
+        </div>
+        <div style="padding: 24px;">
+          <h2 style="margin: 0 0 12px 0; font-size: 20px; color: #ffffff;">${title}</h2>
+          <table style="width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 12px;">
+            <tr>
+              <td style="padding: 6px 0; color: #8b949e; width: 100px;">Endpoint:</td>
+              <td style="padding: 6px 0; color: #58a6ff; font-family: monospace;">
+                <a href="${url}" style="color: #58a6ff; text-decoration: none;">${url}</a>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding: 6px 0; color: #8b949e;">Status:</td>
+              <td style="padding: 6px 0; font-family: monospace; font-weight: bold; color: ${isDown ? '#f85149' : '#10B981'};">
+                HTTP ${statusCode || 200}
+              </td>
+            </tr>
+            <tr>
+              <td style="padding: 6px 0; color: #8b949e;">Latency:</td>
+              <td style="padding: 6px 0; color: #c9d1d9; font-family: monospace;">${latencyMs || 0} ms</td>
+            </tr>
+            <tr>
+              <td style="padding: 6px 0; color: #8b949e;">Timestamp:</td>
+              <td style="padding: 6px 0; color: #8b949e; font-family: monospace;">${timestamp}</td>
+            </tr>
+          </table>
+          ${detailsBlock}
+          <div style="margin-top: 24px; text-align: center;">
+            <a href="https://vakt.apps.harkco.se" style="display: inline-block; background: #10B981; color: #0c1017; font-weight: 700; font-size: 13px; padding: 10px 20px; border-radius: 6px; text-decoration: none;">
+              Open Vakt Fleet Dashboard &rarr;
+            </a>
+          </div>
+        </div>
+        <div style="padding: 12px 24px; background: #0d1117; border-top: 1px solid #21262d; font-size: 11px; color: #8b949e; text-align: center;">
+          Sent by Harkco Vakt Fleet Sentinel • Zero Ads • Autonomous Alerting
+        </div>
+      </div>
+    </body>
+    </html>
+  `;
+}
+
+async function dispatchAlert(event, data) {
+  const settings = getAlertSettings();
+  const timestamp = new Date().toISOString();
+  const results = [];
+
+  if (event === 'incident_opened' && !settings.notifyOnDown) return results;
+  if (event === 'incident_resolved' && !settings.notifyOnRecovery) return results;
+
+  const monitorName = data.monitor?.name || data.monitorName || 'Harkco Service';
+  const monitorUrl = data.monitor?.url || data.url || 'https://vakt.apps.harkco.se';
+  const statusCode = data.statusCode || (event === 'incident_resolved' ? 200 : 500);
+
+  const payload = {
+    service: 'Vakt',
+    event,
+    monitor: {
+      id: data.monitor?.id || 'fleet',
+      name: monitorName,
+      url: monitorUrl,
+    },
+    incident: {
+      statusCode,
+      errorMessage: data.errorMsg || '',
+      errorPayload: data.errorPayload || null,
+      durationSec: data.durationSec || null,
+      latencyMs: data.latencyMs || 0,
+    },
+    timestamp,
+  };
+
+  // 1. Dispatch Webhook
+  if (settings.webhookUrl && (settings.webhookUrl.startsWith('http://') || settings.webhookUrl.startsWith('https://'))) {
+    try {
+      const res = await fetch(settings.webhookUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'User-Agent': 'Harkco-Vakt-Alerts/1.0',
+        },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(5000),
+      });
+      const logId = `al-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+      const statusText = res.ok ? 'delivered' : `failed (${res.status})`;
+      stmtInsertAlertLog.run(logId, event, monitorName, 'webhook', statusText, `Status ${res.status}`, timestamp);
+      results.push({ channel: 'webhook', status: statusText });
+      console.log(`[Vakt Alert] Webhook dispatched -> ${statusText}`);
+    } catch (err) {
+      console.error('[Vakt Alert] Webhook error:', err.message);
+      const logId = `al-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+      stmtInsertAlertLog.run(logId, event, monitorName, 'webhook', 'error', err.message, timestamp);
+      results.push({ channel: 'webhook', status: 'error', error: err.message });
+    }
+  }
+
+  // 2. Dispatch Email via Resend API
+  const resendKey = settings.resendApiKey || process.env.RESEND_API_KEY;
+  if (resendKey && settings.alertEmail) {
+    try {
+      const subject = event === 'incident_opened'
+        ? `🚨 [Vakt] Incident: ${monitorName} returned HTTP ${statusCode}`
+        : (event === 'incident_resolved'
+          ? `✅ [Vakt] Resolved: ${monitorName} recovered in ${data.durationSec || 0}s`
+          : `🛡️ [Vakt] Test Alert: Harkco Sentinel is Active`);
+
+      const html = buildAlertHtml({
+        event,
+        monitorName,
+        url: monitorUrl,
+        statusCode,
+        errorMsg: data.errorMsg,
+        errorPayload: data.errorPayload,
+        durationSec: data.durationSec,
+        latencyMs: data.latencyMs,
+        timestamp,
+      });
+
+      const res = await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${resendKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          from: 'Vakt Sentinel <alerts@apps.harkco.se>',
+          to: [settings.alertEmail],
+          subject,
+          html,
+        }),
+        signal: AbortSignal.timeout(6000),
+      });
+
+      const resJson = await res.json().catch(() => ({}));
+      const logId = `al-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+      const statusText = res.ok ? 'delivered' : `failed (${res.status})`;
+      stmtInsertAlertLog.run(logId, event, monitorName, 'email', statusText, JSON.stringify(resJson), timestamp);
+      results.push({ channel: 'email', status: statusText });
+      console.log(`[Vakt Alert] Resend email sent to ${settings.alertEmail} -> ${statusText}`);
+    } catch (err) {
+      console.error('[Vakt Alert] Resend email error:', err.message);
+      const logId = `al-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+      stmtInsertAlertLog.run(logId, event, monitorName, 'email', 'error', err.message, timestamp);
+      results.push({ channel: 'email', status: 'error', error: err.message });
+    }
+  }
+
+  return results;
+}
+
 // Core Probing Function
 async function probeSingleMonitor(monitor) {
   const start = performance.now();
@@ -174,12 +420,25 @@ async function probeSingleMonitor(monitor) {
         checkedAt
       );
       console.warn(`[Vakt] INCIDENT DETECTED: ${monitor.name} (${monitor.url}) -> ${errorMsg}`);
+      dispatchAlert('incident_opened', {
+        monitor,
+        statusCode,
+        errorMsg,
+        errorPayload: responseBody,
+        latencyMs,
+      }).catch((e) => console.error('[Vakt Alert Dispatch Failed]:', e));
     }
   } else {
     if (openIncident) {
       const durationSec = Math.max(1, Math.round((new Date(checkedAt).getTime() - new Date(openIncident.started_at).getTime()) / 1000));
       stmtResolveIncident.run(checkedAt, durationSec, openIncident.id);
       console.log(`[Vakt] INCIDENT RESOLVED: ${monitor.name} recovered after ${durationSec}s`);
+      dispatchAlert('incident_resolved', {
+        monitor,
+        statusCode: 200,
+        latencyMs,
+        durationSec,
+      }).catch((e) => console.error('[Vakt Alert Dispatch Failed]:', e));
     }
   }
 
@@ -387,6 +646,85 @@ const server = http.createServer(async (req, res) => {
     stmtDeleteMonitorHistory.run(id);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ status: 'deleted', id }));
+    return;
+  }
+
+  // GET /api/settings
+  if (req.method === 'GET' && pathname === '/api/settings') {
+    const s = getAlertSettings();
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      webhookUrl: s.webhookUrl,
+      alertEmail: s.alertEmail,
+      resendApiKeyConfigured: Boolean(s.resendApiKey),
+      notifyOnDown: s.notifyOnDown,
+      notifyOnRecovery: s.notifyOnRecovery,
+    }));
+    return;
+  }
+
+  // POST /api/settings
+  if (req.method === 'POST' && pathname === '/api/settings') {
+    try {
+      const body = await readJsonBody(req);
+      if (typeof body.webhookUrl === 'string') {
+        stmtSetSetting.run('webhook_url', body.webhookUrl.trim());
+      }
+      if (typeof body.alertEmail === 'string') {
+        stmtSetSetting.run('alert_email', body.alertEmail.trim());
+      }
+      if (typeof body.resendApiKey === 'string' && body.resendApiKey.trim()) {
+        stmtSetSetting.run('resend_api_key', body.resendApiKey.trim());
+      }
+      if (typeof body.notifyOnDown === 'boolean') {
+        stmtSetSetting.run('notify_on_down', body.notifyOnDown ? 'true' : 'false');
+      }
+      if (typeof body.notifyOnRecovery === 'boolean') {
+        stmtSetSetting.run('notify_on_recovery', body.notifyOnRecovery ? 'true' : 'false');
+      }
+
+      const updated = getAlertSettings();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        status: 'ok',
+        settings: {
+          webhookUrl: updated.webhookUrl,
+          alertEmail: updated.alertEmail,
+          resendApiKeyConfigured: Boolean(updated.resendApiKey),
+          notifyOnDown: updated.notifyOnDown,
+          notifyOnRecovery: updated.notifyOnRecovery,
+        },
+      }));
+    } catch (err) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: err.message }));
+    }
+    return;
+  }
+
+  // POST /api/alerts/test
+  if (req.method === 'POST' && pathname === '/api/alerts/test') {
+    try {
+      const results = await dispatchAlert('test', {
+        monitorName: 'Harkco Suite Test',
+        url: 'https://vakt.apps.harkco.se',
+        statusCode: 200,
+        latencyMs: 18,
+      });
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ status: 'ok', results }));
+    } catch (err) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: err.message }));
+    }
+    return;
+  }
+
+  // GET /api/alerts/logs
+  if (req.method === 'GET' && pathname === '/api/alerts/logs') {
+    const rawLogs = stmtGetRecentAlertLogs.all();
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(rawLogs));
     return;
   }
 
