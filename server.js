@@ -57,7 +57,7 @@ if (!countRow || countRow.count === 0) {
   `);
 
   const DEFAULT_FLEET = [
-    { id: 'qvitt', name: 'Qvitt', url: 'https://qvitt.se/health' },
+    { id: 'qvitt', name: 'Qvitt', url: 'https://qvitt.se/' },
     { id: 'fakturacraft', name: 'FakturaCraft', url: 'https://fakturacraft.apps.harkco.se/health' },
     { id: 'skattekoll', name: 'SkatteKoll', url: 'https://skattekoll.apps.harkco.se/health' },
     { id: 'moteskoll', name: 'MötesKoll', url: 'https://moteskoll.apps.harkco.se/health' },
@@ -67,7 +67,7 @@ if (!countRow || countRow.count === 0) {
     { id: 'puls', name: 'Puls', url: 'https://puls.apps.harkco.se/health' },
     { id: 'knippa', name: 'Knippa', url: 'https://knippa.apps.harkco.se/health' },
     { id: 'knatte', name: 'Knattepatrullen', url: 'https://knatte.apps.harkco.se/' },
-    { id: 'timecapsule', name: 'Time Capsule', url: 'https://time-capsule.apps.harkco.se/health' },
+    { id: 'timecapsule', name: 'Time Capsule', url: 'https://time-capsule.apps.harkco.se/' },
   ];
 
   const now = new Date().toISOString();
@@ -76,6 +76,10 @@ if (!countRow || countRow.count === 0) {
   }
   console.log(`[Vakt] Seeded ${DEFAULT_FLEET.length} Harkco Daily App monitors.`);
 }
+
+// Migrate/correct any existing monitors
+db.prepare("UPDATE monitors SET url = 'https://qvitt.se/' WHERE id = 'qvitt' AND url = 'https://qvitt.se/health'").run();
+db.prepare("UPDATE monitors SET url = 'https://time-capsule.apps.harkco.se/' WHERE id = 'timecapsule' AND url = 'https://time-capsule.apps.harkco.se/health'").run();
 
 // Prepared statements
 const stmtGetMonitors = db.prepare('SELECT * FROM monitors ORDER BY group_name DESC, name ASC');
