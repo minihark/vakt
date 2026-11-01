@@ -84,6 +84,7 @@ if (!countRow || countRow.count === 0) {
     { id: 'knippa', name: 'Knippa', url: 'https://knippa.apps.harkco.se/health' },
     { id: 'knatte', name: 'Knattepatrullen', url: 'https://knatte.apps.harkco.se/' },
     { id: 'timecapsule', name: 'Time Capsule', url: 'https://time-capsule.apps.harkco.se/' },
+    { id: 'hub', name: 'Harkco Hub', url: 'https://hub.apps.harkco.se/health' },
   ];
 
   const now = new Date().toISOString();
@@ -96,6 +97,7 @@ if (!countRow || countRow.count === 0) {
 // Migrate/correct any existing monitors
 db.prepare("UPDATE monitors SET url = 'https://qvitt.se/' WHERE id = 'qvitt' AND url = 'https://qvitt.se/health'").run();
 db.prepare("UPDATE monitors SET url = 'https://time-capsule.apps.harkco.se/' WHERE id = 'timecapsule' AND url = 'https://time-capsule.apps.harkco.se/health'").run();
+db.prepare("INSERT OR IGNORE INTO monitors (id, name, url, group_name, expected_status, created_at) VALUES ('hub', 'Harkco Hub', 'https://hub.apps.harkco.se/health', 'Harkco Suite', 200, ?)").run(new Date().toISOString());
 
 // Prepared statements
 const stmtGetMonitors = db.prepare('SELECT * FROM monitors ORDER BY group_name DESC, name ASC');
