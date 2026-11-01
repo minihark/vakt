@@ -52,6 +52,9 @@ export interface AlertSettings {
   notifyTelegram: boolean;
   notifyOnDown: boolean;
   notifyOnRecovery: boolean;
+  actionHookUrl: string;
+  selfHealingThreshold: number;
+  enableSelfHealing: boolean;
 }
 
 export interface AlertLog {

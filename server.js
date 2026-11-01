@@ -141,6 +141,11 @@ const stmtInsertAlertLog = db.prepare(`
 `);
 const stmtGetRecentAlertLogs = db.prepare('SELECT * FROM alert_logs ORDER BY dispatched_at DESC LIMIT 25');
 
+// Self-Healing Tracking State
+const consecutiveFailuresMap = new Map(); // monitorId -> consecutive failure count
+const lastHealingAttemptMap = new Map();  // monitorId -> timestamp ms of last action hook trigger
+const HEALING_COOLDOWN_MS = 10 * 60 * 1000; // 10 minutes loop protection
+
 function getAlertSettings() {
   const rows = stmtGetAllSettings.all();
   const map = {};
@@ -156,6 +161,9 @@ function getAlertSettings() {
     notifyTelegram: map.notify_telegram !== 'false',
     notifyOnDown: map.notify_on_down !== 'false',
     notifyOnRecovery: map.notify_on_recovery !== 'false',
+    actionHookUrl: map.action_hook_url || process.env.VAKT_ACTION_HOOK_URL || '',
+    selfHealingThreshold: parseInt(map.self_healing_threshold, 10) || 3,
+    enableSelfHealing: map.enable_self_healing === 'true',
   };
 }
 
@@ -419,6 +427,89 @@ async function dispatchAlert(event, data) {
   return results;
 }
 
+// Autonomous Self-Healing Action Hook Dispatcher
+async function dispatchSelfHealingAction(monitor, failures, settings = null) {
+  if (!settings) settings = getAlertSettings();
+  const timestamp = new Date().toISOString();
+  const hookUrl = settings.actionHookUrl;
+
+  if (!hookUrl || (!hookUrl.startsWith('http://') && !hookUrl.startsWith('https://'))) {
+    console.warn(`[Vakt Self-Healing] Skipped: Action hook URL not configured or invalid.`);
+    return { success: false, reason: 'unconfigured' };
+  }
+
+  const payload = {
+    service: 'Vakt',
+    event: 'service_self_healing_triggered',
+    monitor: {
+      id: monitor.id,
+      name: monitor.name,
+      url: monitor.url,
+    },
+    consecutiveFailures: failures,
+    cooldownMinutes: 10,
+    action: 'restart_or_recover',
+    timestamp,
+  };
+
+  let statusText = 'unknown';
+  let details = '';
+
+  try {
+    const res = await fetch(hookUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'User-Agent': 'Harkco-Vakt-SelfHealing/1.0',
+      },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(7000),
+    });
+
+    statusText = res.ok ? 'delivered' : `failed (${res.status})`;
+    details = `HTTP ${res.status}`;
+    console.log(`[Vakt Self-Healing] Action Hook triggered for ${monitor.name} -> ${statusText}`);
+  } catch (err) {
+    statusText = 'error';
+    details = err.message;
+    console.error(`[Vakt Self-Healing] Error invoking Action Hook for ${monitor.name}:`, err.message);
+  }
+
+  const logId = `heal-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+  stmtInsertAlertLog.run(logId, 'self_healing_action', monitor.name, 'action_hook', statusText, details, timestamp);
+
+  // Send Telegram notification about self-healing attempt
+  if (settings.notifyTelegram && settings.telegramBotToken && settings.telegramChatId) {
+    try {
+      const tgUrl = `https://api.telegram.org/bot${settings.telegramBotToken}/sendMessage`;
+      const maskedUrl = hookUrl.replace(/(token|secret|key)=[^&]+/gi, '$1=***');
+      const tgText =
+        `🔄 <b>[VAKT SJÄLVLÄKNING] Action Hook aktiverad för ${escapeHtml(monitor.name)}</b>\n\n` +
+        `⚠️ <b>Orsak:</b> <code>${failures} konsekutiva probe-fel</code> (~${failures * 45}s nertid)\n` +
+        `🔗 <b>Övervakad URL:</b> <code>${escapeHtml(monitor.url)}</code>\n` +
+        `🛠 <b>Action Hook:</b> <code>${escapeHtml(maskedUrl)}</code>\n` +
+        `📡 <b>Resultat:</b> <code>${escapeHtml(statusText)} (${escapeHtml(details)})</code>\n` +
+        `⏱ <b>Cooldown:</b> 10 minuters skydd aktivt mot omstart-loopar.`;
+
+      await fetch(tgUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: settings.telegramChatId,
+          text: tgText,
+          parse_mode: 'HTML',
+          disable_web_page_preview: true,
+        }),
+        signal: AbortSignal.timeout(5000),
+      }).catch(() => {});
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  return { success: statusText === 'delivered', status: statusText, details };
+}
+
 // Core Probing Function
 async function probeSingleMonitor(monitor) {
   const start = performance.now();
@@ -463,9 +554,14 @@ async function probeSingleMonitor(monitor) {
   // Insert into history
   stmtInsertProbe.run(monitor.id, statusCode, latencyMs, isUp ? 1 : 0, responseBody, checkedAt);
 
-  // Manage Incidents
+  // Manage Incidents & Consecutive Failure Counter
   const openIncident = stmtGetOpenIncident.get(monitor.id);
+  const settings = getAlertSettings();
+
   if (!isUp) {
+    const currentFailures = (consecutiveFailuresMap.get(monitor.id) || 0) + 1;
+    consecutiveFailuresMap.set(monitor.id, currentFailures);
+
     if (!openIncident) {
       const incidentId = `inc-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
       stmtInsertIncident.run(
@@ -487,7 +583,28 @@ async function probeSingleMonitor(monitor) {
         latencyMs,
       }).catch((e) => console.error('[Vakt Alert Dispatch Failed]:', e));
     }
+
+    // Check if self-healing should trigger
+    if (settings.enableSelfHealing && currentFailures >= settings.selfHealingThreshold) {
+      const lastAttempt = lastHealingAttemptMap.get(monitor.id) || 0;
+      const nowMs = Date.now();
+      if (nowMs - lastAttempt > HEALING_COOLDOWN_MS) {
+        lastHealingAttemptMap.set(monitor.id, nowMs);
+        console.log(`[Vakt Self-Healing] Triggering action hook for ${monitor.name} (${currentFailures} consecutive failures)`);
+        dispatchSelfHealingAction(monitor, currentFailures, settings).catch((e) =>
+          console.error('[Vakt Self-Healing Dispatch Failed]:', e)
+        );
+      } else {
+        const remainingCooldownSec = Math.round((HEALING_COOLDOWN_MS - (nowMs - lastAttempt)) / 1000);
+        console.log(`[Vakt Self-Healing] Cooldown active for ${monitor.name} (${remainingCooldownSec}s remaining). Action hook throttled.`);
+      }
+    }
   } else {
+    // Reset consecutive failures counter on healthy probe
+    if ((consecutiveFailuresMap.get(monitor.id) || 0) > 0) {
+      consecutiveFailuresMap.set(monitor.id, 0);
+    }
+
     if (openIncident) {
       const durationSec = Math.max(1, Math.round((new Date(checkedAt).getTime() - new Date(openIncident.started_at).getTime()) / 1000));
       stmtResolveIncident.run(checkedAt, durationSec, openIncident.id);
@@ -721,6 +838,9 @@ const server = http.createServer(async (req, res) => {
       notifyTelegram: s.notifyTelegram,
       notifyOnDown: s.notifyOnDown,
       notifyOnRecovery: s.notifyOnRecovery,
+      actionHookUrl: s.actionHookUrl,
+      selfHealingThreshold: s.selfHealingThreshold,
+      enableSelfHealing: s.enableSelfHealing,
     }));
     return;
   }
@@ -753,6 +873,18 @@ const server = http.createServer(async (req, res) => {
       if (typeof body.notifyOnRecovery === 'boolean') {
         stmtSetSetting.run('notify_on_recovery', body.notifyOnRecovery ? 'true' : 'false');
       }
+      if (typeof body.actionHookUrl === 'string') {
+        stmtSetSetting.run('action_hook_url', body.actionHookUrl.trim());
+      }
+      if (typeof body.selfHealingThreshold === 'number' || typeof body.selfHealingThreshold === 'string') {
+        const parsed = parseInt(body.selfHealingThreshold, 10);
+        if (!isNaN(parsed) && parsed > 0) {
+          stmtSetSetting.run('self_healing_threshold', String(parsed));
+        }
+      }
+      if (typeof body.enableSelfHealing === 'boolean') {
+        stmtSetSetting.run('enable_self_healing', body.enableSelfHealing ? 'true' : 'false');
+      }
 
       const updated = getAlertSettings();
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -767,6 +899,9 @@ const server = http.createServer(async (req, res) => {
           notifyTelegram: updated.notifyTelegram,
           notifyOnDown: updated.notifyOnDown,
           notifyOnRecovery: updated.notifyOnRecovery,
+          actionHookUrl: updated.actionHookUrl,
+          selfHealingThreshold: updated.selfHealingThreshold,
+          enableSelfHealing: updated.enableSelfHealing,
         },
       }));
     } catch (err) {
@@ -787,6 +922,29 @@ const server = http.createServer(async (req, res) => {
       });
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ status: 'ok', results }));
+    } catch (err) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: err.message }));
+    }
+    return;
+  }
+
+  // POST /api/alerts/test-action-hook
+  if (req.method === 'POST' && pathname === '/api/alerts/test-action-hook') {
+    try {
+      const s = getAlertSettings();
+      if (!s.actionHookUrl) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Ingen Action Hook URL konfigurerad. Fyll i en giltig webhook URL först.' }));
+        return;
+      }
+      const result = await dispatchSelfHealingAction(
+        { id: 'test-monitor', name: 'Test Service (Självläkning)', url: 'https://vakt.apps.harkco.se' },
+        s.selfHealingThreshold || 3,
+        s
+      );
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ status: 'ok', result }));
     } catch (err) {
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: err.message }));
