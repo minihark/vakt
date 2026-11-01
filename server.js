@@ -167,6 +167,9 @@ function getAlertSettings() {
     actionHookUrl: map.action_hook_url || process.env.VAKT_ACTION_HOOK_URL || '',
     selfHealingThreshold: parseInt(map.self_healing_threshold, 10) || 3,
     enableSelfHealing: map.enable_self_healing === 'true',
+    morningDigestEnabled: map.morning_digest_enabled !== 'false',
+    morningDigestHour: parseInt(map.morning_digest_hour, 10) || 8,
+    lastDailyDigestDate: map.last_daily_digest_date || '',
   };
 }
 
@@ -430,6 +433,168 @@ async function dispatchAlert(event, data) {
   return results;
 }
 
+// ---------------------------------------------------------------------------
+// 3.5 MORNING FLEET HEALTH DIGEST (DAILY TELEGRAM SUMMARY)
+// ---------------------------------------------------------------------------
+function buildDailyDigest(hours = 24) {
+  const since = new Date(Date.now() - hours * 3600 * 1000).toISOString();
+  const monitors = stmtGetMonitors.all();
+
+  let totalProbes = 0;
+  let totalUp = 0;
+  let totalLatency = 0;
+
+  const appStats = monitors.map((m) => {
+    const probes = db
+      .prepare('SELECT is_up, latency_ms FROM probe_history WHERE monitor_id = ? AND checked_at >= ?')
+      .all(m.id, since);
+    const up = probes.filter((p) => p.is_up).length;
+    const count = probes.length;
+    const uptime = count > 0 ? ((up / count) * 100).toFixed(1) : '100.0';
+    const sumLatency = probes.reduce((sum, p) => sum + p.latency_ms, 0);
+    const avgLat = count > 0 ? Math.round(sumLatency / count) : 0;
+
+    totalProbes += count;
+    totalUp += up;
+    totalLatency += sumLatency;
+
+    return {
+      id: m.id,
+      name: m.name,
+      count,
+      up,
+      uptime,
+      avgLat,
+    };
+  });
+
+  // Sort by average latency ascending
+  appStats.sort((a, b) => a.avgLat - b.avgLat);
+
+  const fleetUptime = totalProbes > 0 ? ((totalUp / totalProbes) * 100).toFixed(2) : '100.00';
+  const avgFleetLat = totalProbes > 0 ? Math.round(totalLatency / totalProbes) : 0;
+
+  // Query incidents in window
+  const recentIncidents = db
+    .prepare('SELECT * FROM incidents WHERE started_at >= ? ORDER BY started_at DESC')
+    .all(since);
+
+  // Date formatted in Swedish
+  const now = new Date();
+  const dateFormatted = new Intl.DateTimeFormat('sv-SE', {
+    timeZone: 'Europe/Stockholm',
+    weekday: 'long',
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+  }).format(now);
+  const capitalizedDate = dateFormatted.charAt(0).toUpperCase() + dateFormatted.slice(1);
+
+  const appRowsHtml = appStats
+    .map((app) => {
+      const dot = Number(app.uptime) >= 99.5 ? '🟢' : Number(app.uptime) >= 95 ? '🟡' : '🔴';
+      return `${dot} <b>${escapeHtml(app.name)}</b> — <code>${app.uptime}%</code> · <code>${app.avgLat} ms</code>`;
+    })
+    .join('\n');
+
+  let incidentsText = '';
+  if (recentIncidents.length === 0) {
+    incidentsText = '✨ <b>Driftstörningar senaste dygnet:</b> <code>0 incidenter</code> (Felfritt)';
+  } else {
+    incidentsText =
+      `⚠️ <b>Driftstörningar senaste ${hours}h:</b> <code>${recentIncidents.length} st</code>\n` +
+      recentIncidents
+        .slice(0, 5)
+        .map(
+          (inc) =>
+            `• <b>${escapeHtml(inc.monitor_name)}</b>: ${inc.duration_sec ? `${inc.duration_sec}s nertid` : 'Aktiv störning'}`
+        )
+        .join('\n');
+  }
+
+  const telegramHtml =
+    `🌅 <b>[HARKCO VAKT] Morgonrapport för flottan</b>\n` +
+    `📅 <i>${escapeHtml(capitalizedDate)} · 08:00 CET</i>\n\n` +
+    `🛡️ <b>Flottans status: ${monitors.length}/${monitors.length} Operativa</b>\n` +
+    `📊 <b>24h Uptime:</b> <code>${fleetUptime}%</code> (${totalProbes.toLocaleString('sv-SE')} radar-prober)\n` +
+    `⚡ <b>Genomsnittlig latens:</b> <code>${avgFleetLat} ms</code>\n` +
+    `${incidentsText}\n\n` +
+    `<b>App-telemetri (${monitors.length} appar):</b>\n` +
+    `${appRowsHtml}\n\n` +
+    `🔗 <a href="https://vakt.apps.harkco.se">Öppna Vakt Instrumentpanel</a>`;
+
+  return {
+    telegramHtml,
+    stats: {
+      totalMonitors: monitors.length,
+      totalProbes,
+      totalUp,
+      fleetUptime,
+      avgFleetLat,
+      incidentsCount: recentIncidents.length,
+      appStats,
+    },
+  };
+}
+
+async function sendDailyDigest(isManual = false) {
+  const settings = getAlertSettings();
+  const timestamp = new Date().toISOString();
+  const digest = buildDailyDigest(24);
+
+  if (!settings.telegramBotToken || !settings.telegramChatId) {
+    const errorMsg = 'Telegram bot token eller chat ID saknas';
+    console.warn(`[Vakt Digest] ${errorMsg}`);
+    return { ok: false, error: errorMsg, stats: digest.stats };
+  }
+
+  const tgUrl = `https://api.telegram.org/bot${settings.telegramBotToken}/sendMessage`;
+  try {
+    const res = await fetch(tgUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: settings.telegramChatId,
+        text: digest.telegramHtml,
+        parse_mode: 'HTML',
+        disable_web_page_preview: true,
+      }),
+      signal: AbortSignal.timeout(8000),
+    });
+
+    const resJson = await res.json().catch(() => ({}));
+    const logId = `al-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    const eventName = isManual ? 'daily_digest_manual' : 'daily_digest_scheduled';
+    const statusText = res.ok && resJson.ok ? 'delivered' : `failed (${res.status})`;
+
+    stmtInsertAlertLog.run(
+      logId,
+      eventName,
+      'Harkco Flotta (24h)',
+      'telegram',
+      statusText,
+      `Uptime: ${digest.stats.fleetUptime}%, Snitt: ${digest.stats.avgFleetLat}ms, Prober: ${digest.stats.totalProbes}`,
+      timestamp
+    );
+
+    console.log(`[Vakt Digest] Morning digest dispatched to Telegram -> ${statusText}`);
+    return { ok: res.ok && resJson.ok, statusText, stats: digest.stats, digestHtml: digest.telegramHtml };
+  } catch (err) {
+    console.error('[Vakt Digest] Telegram error:', err.message);
+    const logId = `al-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    stmtInsertAlertLog.run(
+      logId,
+      isManual ? 'daily_digest_manual' : 'daily_digest_scheduled',
+      'Harkco Flotta (24h)',
+      'telegram',
+      'error',
+      err.message,
+      timestamp
+    );
+    return { ok: false, error: err.message, stats: digest.stats };
+  }
+}
+
 // Autonomous Self-Healing Action Hook Dispatcher
 async function dispatchSelfHealingAction(monitor, failures, settings = null) {
   if (!settings) settings = getAlertSettings();
@@ -642,6 +807,46 @@ async function probeAllMonitors() {
 setInterval(() => {
   probeAllMonitors().catch((err) => console.error('[Vakt Scheduler Error]:', err));
 }, 45000);
+
+// Background scheduler for 08:00 CET Morning Fleet Health Digest
+setInterval(() => {
+  try {
+    const settings = getAlertSettings();
+    if (!settings.morningDigestEnabled) return;
+
+    const now = new Date();
+    const formatter = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Europe/Stockholm',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    });
+    const parts = formatter.formatToParts(now);
+    const getPart = (type) => parts.find((p) => p.type === type)?.value;
+    const yyyy = getPart('year');
+    const mm = getPart('month');
+    const dd = getPart('day');
+    const hour = parseInt(getPart('hour'), 10);
+    const minute = parseInt(getPart('minute'), 10);
+    const dateKey = `${yyyy}-${mm}-${dd}`;
+
+    const targetHour = settings.morningDigestHour || 8;
+
+    // Trigger at targetHour:00 CET (within 0-4 minutes window)
+    if (hour === targetHour && minute < 5) {
+      if (settings.lastDailyDigestDate !== dateKey) {
+        console.log(`[Vakt Digest] Dispatching automated morning digest for ${dateKey} at ${hour}:${minute} CET...`);
+        stmtSetSetting.run('last_daily_digest_date', dateKey);
+        sendDailyDigest(false).catch((e) => console.error('[Vakt Digest Error]:', e));
+      }
+    }
+  } catch (err) {
+    console.error('[Vakt Digest Schedule Error]:', err);
+  }
+}, 30000);
 
 // Initial probe on startup after 2 seconds
 setTimeout(() => {
@@ -940,6 +1145,9 @@ const server = http.createServer(async (req, res) => {
       actionHookUrl: s.actionHookUrl,
       selfHealingThreshold: s.selfHealingThreshold,
       enableSelfHealing: s.enableSelfHealing,
+      morningDigestEnabled: s.morningDigestEnabled,
+      morningDigestHour: s.morningDigestHour,
+      lastDailyDigestDate: s.lastDailyDigestDate,
     }));
     return;
   }
@@ -984,6 +1192,15 @@ const server = http.createServer(async (req, res) => {
       if (typeof body.enableSelfHealing === 'boolean') {
         stmtSetSetting.run('enable_self_healing', body.enableSelfHealing ? 'true' : 'false');
       }
+      if (typeof body.morningDigestEnabled === 'boolean') {
+        stmtSetSetting.run('morning_digest_enabled', body.morningDigestEnabled ? 'true' : 'false');
+      }
+      if (typeof body.morningDigestHour === 'number' || typeof body.morningDigestHour === 'string') {
+        const parsed = parseInt(body.morningDigestHour, 10);
+        if (!isNaN(parsed) && parsed >= 0 && parsed <= 23) {
+          stmtSetSetting.run('morning_digest_hour', String(parsed));
+        }
+      }
 
       const updated = getAlertSettings();
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -1001,8 +1218,37 @@ const server = http.createServer(async (req, res) => {
           actionHookUrl: updated.actionHookUrl,
           selfHealingThreshold: updated.selfHealingThreshold,
           enableSelfHealing: updated.enableSelfHealing,
+          morningDigestEnabled: updated.morningDigestEnabled,
+          morningDigestHour: updated.morningDigestHour,
+          lastDailyDigestDate: updated.lastDailyDigestDate,
         },
       }));
+    } catch (err) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: err.message }));
+    }
+    return;
+  }
+
+  // POST /api/alerts/digest (Manually dispatch morning digest to Telegram)
+  if (req.method === 'POST' && pathname === '/api/alerts/digest') {
+    try {
+      const result = await sendDailyDigest(true);
+      res.writeHead(result.ok ? 200 : 500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(result));
+    } catch (err) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: err.message }));
+    }
+    return;
+  }
+
+  // GET /api/alerts/digest/preview (Preview 24h fleet digest stats without sending)
+  if (req.method === 'GET' && pathname === '/api/alerts/digest/preview') {
+    try {
+      const digest = buildDailyDigest(24);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(digest));
     } catch (err) {
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: err.message }));

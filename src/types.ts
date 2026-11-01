@@ -55,6 +55,9 @@ export interface AlertSettings {
   actionHookUrl: string;
   selfHealingThreshold: number;
   enableSelfHealing: boolean;
+  morningDigestEnabled: boolean;
+  morningDigestHour: number;
+  lastDailyDigestDate?: string;
 }
 
 export interface AlertLog {

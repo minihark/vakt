@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { X, Bell, Webhook, Mail, CheckCircle2, AlertTriangle, Send, ShieldCheck, Key, RefreshCw, MessageSquare, RotateCcw, Zap } from 'lucide-react';
+import { X, Bell, Webhook, Mail, CheckCircle2, AlertTriangle, Send, ShieldCheck, Key, RefreshCw, MessageSquare, RotateCcw, Zap, Sun } from 'lucide-react';
 import { AlertSettings, AlertLog } from '../types';
 import { playClick, playAlertSent } from '../utils/audio';
 
@@ -21,6 +21,8 @@ export const AlertSettingsDrawer: React.FC<AlertSettingsDrawerProps> = ({ isOpen
     actionHookUrl: '',
     selfHealingThreshold: 3,
     enableSelfHealing: false,
+    morningDigestEnabled: true,
+    morningDigestHour: 8,
   });
   const [resendApiKeyInput, setResendApiKeyInput] = useState('');
   const [telegramBotTokenInput, setTelegramBotTokenInput] = useState('');
@@ -28,8 +30,10 @@ export const AlertSettingsDrawer: React.FC<AlertSettingsDrawerProps> = ({ isOpen
   const [isSaving, setIsSaving] = useState(false);
   const [isTesting, setIsTesting] = useState(false);
   const [isTestingActionHook, setIsTestingActionHook] = useState(false);
+  const [isTestingDigest, setIsTestingDigest] = useState(false);
   const [testResult, setTestResult] = useState<{ message: string; success: boolean } | null>(null);
   const [actionHookResult, setActionHookResult] = useState<{ message: string; success: boolean } | null>(null);
+  const [digestResult, setDigestResult] = useState<{ message: string; success: boolean } | null>(null);
   const [saveSuccess, setSaveSuccess] = useState(false);
 
   useEffect(() => {
@@ -38,6 +42,7 @@ export const AlertSettingsDrawer: React.FC<AlertSettingsDrawerProps> = ({ isOpen
       loadLogs();
       setTestResult(null);
       setActionHookResult(null);
+      setDigestResult(null);
       setSaveSuccess(false);
     }
   }, [isOpen]);
@@ -52,6 +57,8 @@ export const AlertSettingsDrawer: React.FC<AlertSettingsDrawerProps> = ({ isOpen
           selfHealingThreshold: data.selfHealingThreshold || 3,
           enableSelfHealing: Boolean(data.enableSelfHealing),
           actionHookUrl: data.actionHookUrl || '',
+          morningDigestEnabled: data.morningDigestEnabled !== false,
+          morningDigestHour: data.morningDigestHour || 8,
         });
       }
     } catch (err) {
@@ -87,6 +94,8 @@ export const AlertSettingsDrawer: React.FC<AlertSettingsDrawerProps> = ({ isOpen
         actionHookUrl: settings.actionHookUrl.trim(),
         selfHealingThreshold: Number(settings.selfHealingThreshold) || 3,
         enableSelfHealing: settings.enableSelfHealing,
+        morningDigestEnabled: settings.morningDigestEnabled,
+        morningDigestHour: Number(settings.morningDigestHour) || 8,
       };
 
       if (resendApiKeyInput.trim()) {
@@ -146,6 +155,35 @@ export const AlertSettingsDrawer: React.FC<AlertSettingsDrawerProps> = ({ isOpen
       setTestResult({ success: false, message: msg });
     } finally {
       setIsTesting(false);
+    }
+  }
+
+  async function handleTestDigest() {
+    setIsTestingDigest(true);
+    setDigestResult(null);
+    playClick();
+
+    try {
+      const res = await fetch('/api/alerts/digest', { method: 'POST' });
+      const data = await res.json();
+      playAlertSent();
+      if (res.ok) {
+        setDigestResult({
+          success: true,
+          message: `Morgonrapport skickad till Telegram! (${data.stats?.fleetUptime}% uptime · ${data.stats?.avgFleetLat} ms snitt · ${data.stats?.totalProbes} prober)`,
+        });
+        loadLogs();
+      } else {
+        setDigestResult({
+          success: false,
+          message: data.error || 'Kunde inte skicka morgonrapport',
+        });
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Nätverksfel';
+      setDigestResult({ success: false, message: msg });
+    } finally {
+      setIsTestingDigest(false);
     }
   }
 
@@ -373,6 +411,75 @@ export const AlertSettingsDrawer: React.FC<AlertSettingsDrawerProps> = ({ isOpen
                   </p>
                 </div>
               </label>
+            </div>
+
+            {/* Morning Fleet Health Digest (Daily Telegram Summary) */}
+            <div className="space-y-3 pt-2 border-t border-[#21262d]">
+              <div className="flex items-center justify-between">
+                <label className="text-xs font-semibold text-zinc-300 flex items-center gap-2">
+                  <Sun className="w-4 h-4 text-amber-400" />
+                  Morgonrapport till Telegram (Daily Digest)
+                </label>
+                {settings.morningDigestEnabled && (
+                  <span className="text-[10px] text-amber-300 font-mono flex items-center gap-1 bg-amber-950/60 border border-amber-500/30 px-2 py-0.5 rounded">
+                    Kl {String(settings.morningDigestHour || 8).padStart(2, '0')}:00 CET
+                  </span>
+                )}
+              </div>
+
+              <label className="flex items-start gap-3 p-3 rounded-lg bg-[#161b22] border border-[#30363d] cursor-pointer hover:border-zinc-600 transition-colors">
+                <input
+                  type="checkbox"
+                  checked={settings.morningDigestEnabled}
+                  onChange={(e) => setSettings({ ...settings, morningDigestEnabled: e.target.checked })}
+                  className="mt-0.5 rounded border-[#30363d] text-amber-500 focus:ring-0 bg-[#0d1117]"
+                />
+                <div className="flex-1">
+                  <div className="text-xs font-medium text-white flex items-center gap-2">
+                    Skicka morgonrapport automatiskt kl {String(settings.morningDigestHour || 8).padStart(2, '0')}:00 CET
+                    <span className="w-2 h-2 rounded-full bg-amber-400"></span>
+                  </div>
+                  <p className="text-[11px] text-zinc-400 mt-0.5">
+                    Summerar senaste 24 timmarnas flotta: total uptime %, alla 12 appars svarstider och nattens incidenter.
+                  </p>
+                </div>
+              </label>
+
+              <div className="flex items-center justify-between pt-1">
+                <p className="text-[10px] text-zinc-500 font-mono">
+                  Skickas direkt till din Telegram-chatt varje morgon.
+                </p>
+                <button
+                  type="button"
+                  onClick={handleTestDigest}
+                  disabled={isTestingDigest || !settings.telegramChatId}
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded bg-[#21262d] hover:bg-[#30363d] text-amber-300 text-[11px] font-mono border border-amber-500/20 transition-colors disabled:opacity-50"
+                >
+                  {isTestingDigest ? (
+                    <RefreshCw className="w-3 h-3 animate-spin" />
+                  ) : (
+                    <Sun className="w-3 h-3" />
+                  )}
+                  Skicka morgonrapport nu (Test)
+                </button>
+              </div>
+
+              {digestResult && (
+                <div
+                  className={`p-2.5 rounded text-xs font-mono flex items-center gap-2 ${
+                    digestResult.success
+                      ? 'bg-emerald-950/60 border border-emerald-500/30 text-emerald-400'
+                      : 'bg-rose-950/60 border border-rose-500/30 text-rose-400'
+                  }`}
+                >
+                  {digestResult.success ? (
+                    <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                  ) : (
+                    <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                  )}
+                  {digestResult.message}
+                </div>
+              )}
             </div>
 
             {/* Autonomous Self-Healing / Restart Action Hooks */}
