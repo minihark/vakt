@@ -1,17 +1,19 @@
 import React from 'react';
 import { Monitor } from '../types';
-import { ExternalLink, Terminal, Trash2 } from 'lucide-react';
+import { ExternalLink, Terminal, Trash2, Shield } from 'lucide-react';
 import { playClick } from '../utils/audio';
 
 interface MonitorCardProps {
   monitor: Monitor;
   onInspectJson: (monitor: Monitor) => void;
+  onOpenBadgeModal?: (monitorId: string) => void;
   onDeleteMonitor?: (id: string) => void;
 }
 
 export const MonitorCard: React.FC<MonitorCardProps> = ({
   monitor,
   onInspectJson,
+  onOpenBadgeModal,
   onDeleteMonitor,
 }) => {
   const isUp = monitor.currentStatus === 'up';
@@ -90,17 +92,34 @@ export const MonitorCard: React.FC<MonitorCardProps> = ({
 
       {/* Bottom Actions */}
       <div className="pt-2 border-t border-[#1A2438] flex items-center justify-between gap-2">
-        <button
-          type="button"
-          onClick={() => {
-            playClick();
-            onInspectJson(monitor);
-          }}
-          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#080C14] hover:bg-[#141C30] border border-[#1A2438] hover:border-[#263552] text-xs font-mono text-[#94A3B8] hover:text-white transition cursor-pointer"
-        >
-          <Terminal className="w-3.5 h-3.5 text-[#06B6D4]" />
-          <span>Inspektera JSON</span>
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => {
+              playClick();
+              onInspectJson(monitor);
+            }}
+            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-[#080C14] hover:bg-[#141C30] border border-[#1A2438] hover:border-[#263552] text-xs font-mono text-[#94A3B8] hover:text-white transition cursor-pointer"
+          >
+            <Terminal className="w-3.5 h-3.5 text-[#06B6D4]" />
+            <span>JSON</span>
+          </button>
+
+          {onOpenBadgeModal && (
+            <button
+              type="button"
+              onClick={() => {
+                playClick();
+                onOpenBadgeModal(monitor.id);
+              }}
+              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-[#080C14] hover:bg-[#141C30] border border-[#1A2438] hover:border-emerald-500/40 text-xs font-mono text-emerald-400 hover:text-emerald-300 transition cursor-pointer"
+              title={`Hämta SVG-sköld för ${monitor.name}`}
+            >
+              <Shield className="w-3.5 h-3.5 text-emerald-400" />
+              <span>Sköld</span>
+            </button>
+          )}
+        </div>
 
         {monitor.group === 'Custom' && onDeleteMonitor && (
           <button

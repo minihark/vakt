@@ -7,6 +7,7 @@ import { JsonInspectorDrawer } from './components/JsonInspectorDrawer';
 import { AddMonitorModal } from './components/AddMonitorModal';
 import { ProUpgradeModal } from './components/ProUpgradeModal';
 import { AlertSettingsDrawer } from './components/AlertSettingsDrawer';
+import { BadgeEmbedModal } from './components/BadgeEmbedModal';
 import { playSonarPing, playIncidentAlarm, setAudioMuted } from './utils/audio';
 import { History } from 'lucide-react';
 
@@ -21,6 +22,8 @@ export const App: React.FC = () => {
 
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [isAlertsDrawerOpen, setIsAlertsDrawerOpen] = useState(false);
+  const [isBadgeModalOpen, setIsBadgeModalOpen] = useState(false);
+  const [badgeTargetId, setBadgeTargetId] = useState<string | undefined>('fleet');
   const [isProModalOpen, setIsProModalOpen] = useState(false);
   const [inspectorMonitor, setInspectorMonitor] = useState<Monitor | null>(null);
 
@@ -153,6 +156,10 @@ export const App: React.FC = () => {
         onToggleMute={handleToggleMute}
         onOpenAddModal={() => setIsAddModalOpen(true)}
         onOpenAlertsDrawer={() => setIsAlertsDrawerOpen(true)}
+        onOpenBadgeModal={() => {
+          setBadgeTargetId('fleet');
+          setIsBadgeModalOpen(true);
+        }}
         onOpenProModal={() => setIsProModalOpen(true)}
         isPro={isPro}
         incidentCount={fleetStats.incidentCount}
@@ -190,6 +197,10 @@ export const App: React.FC = () => {
                 key={monitor.id}
                 monitor={monitor}
                 onInspectJson={setInspectorMonitor}
+                onOpenBadgeModal={(id) => {
+                  setBadgeTargetId(id);
+                  setIsBadgeModalOpen(true);
+                }}
                 onDeleteMonitor={handleDeleteMonitor}
               />
             ))}
@@ -242,6 +253,14 @@ export const App: React.FC = () => {
       <AlertSettingsDrawer
         isOpen={isAlertsDrawerOpen}
         onClose={() => setIsAlertsDrawerOpen(false)}
+      />
+
+      {/* Public Status Shield Badges Modal */}
+      <BadgeEmbedModal
+        isOpen={isBadgeModalOpen}
+        onClose={() => setIsBadgeModalOpen(false)}
+        monitors={monitors}
+        initialMonitorId={badgeTargetId}
       />
 
       {/* Add Monitor Modal */}

@@ -16,7 +16,7 @@ COPY package*.json ./
 RUN npm install --omit=dev
 
 COPY --from=builder /app/dist ./dist
-COPY server.js ./
+COPY server.js badge-generator.js ./
 
 RUN mkdir -p /app/data
 VOLUME ["/app/data"]

@@ -7,6 +7,7 @@ interface NavbarProps {
   onToggleMute: () => void;
   onOpenAddModal: () => void;
   onOpenAlertsDrawer: () => void;
+  onOpenBadgeModal: () => void;
   onOpenProModal: () => void;
   isPro: boolean;
   incidentCount: number;
@@ -17,6 +18,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   onToggleMute,
   onOpenAddModal,
   onOpenAlertsDrawer,
+  onOpenBadgeModal,
   onOpenProModal,
   isPro,
   incidentCount,
@@ -82,6 +84,20 @@ export const Navbar: React.FC<NavbarProps> = ({
           >
             <Bell className="w-3.5 h-3.5 text-emerald-400" />
             <span className="hidden sm:inline">Larm & Webhook</span>
+          </button>
+
+          {/* Status Shields Button */}
+          <button
+            type="button"
+            onClick={() => {
+              playClick();
+              onOpenBadgeModal();
+            }}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#0E1422] hover:bg-[#141C30] border border-[#1A2438] hover:border-[#263552] text-white transition font-medium"
+            title="Hämta Status Shields & Inbäddningssköldar"
+          >
+            <ShieldCheck className="w-3.5 h-3.5 text-cyan-400" />
+            <span className="hidden sm:inline">Sköldar</span>
           </button>
 
           {/* Audio Mute/Unmute */}

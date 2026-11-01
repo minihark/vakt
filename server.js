@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import sirv from 'sirv';
+import { renderSvgBadge } from './badge-generator.js';
 
 const PORT = Number(process.env.PORT) || 80;
 const DATA_DIR = path.resolve('data');
@@ -689,11 +690,12 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // GET /health
-  if (req.method === 'GET' && pathname === '/health') {
+  // GET or HEAD /health
+  if ((req.method === 'GET' || req.method === 'HEAD') && pathname === '/health') {
     const monitors = stmtGetMonitors.all();
     const openIncidents = db.prepare('SELECT count(*) as count FROM incidents WHERE resolved_at IS NULL').get();
     res.writeHead(200, { 'Content-Type': 'application/json' });
+    if (req.method === 'HEAD') return res.end();
     res.end(JSON.stringify({
       status: 'ok',
       app: 'Vakt',
@@ -703,6 +705,101 @@ const server = http.createServer(async (req, res) => {
       fleet_status: (openIncidents?.count || 0) === 0 ? 'all_operational' : 'degraded',
       service: 'vakt',
     }));
+    return;
+  }
+
+  // GET or HEAD /badge/:id.svg or /api/badge/:id.svg (Public Status Shield Badges)
+  const badgeMatch = pathname.match(/^\/(?:api\/)?badge\/([a-zA-Z0-9_-]+)\.svg$/);
+  if ((req.method === 'GET' || req.method === 'HEAD') && badgeMatch) {
+    const targetId = badgeMatch[1].toLowerCase();
+    const query = parsedUrl.searchParams;
+    const metric = (query.get('metric') || 'status').toLowerCase();
+    const customLabel = query.get('label');
+    const showDot = query.get('dot') !== 'false';
+
+    let leftText = customLabel || 'Vakt';
+    let rightText = 'UNKNOWN';
+    let status = 'neutral';
+
+    if (targetId === 'fleet' || targetId === 'harkco' || targetId === 'all') {
+      leftText = customLabel || 'Harkco Fleet';
+      const monitors = stmtGetMonitors.all();
+      const openIncidents = db.prepare('SELECT count(*) as count FROM incidents WHERE resolved_at IS NULL').get()?.count || 0;
+
+      if (metric === 'uptime') {
+        let totalUp = 0;
+        let totalProbes = 0;
+        for (const m of monitors) {
+          const hist = stmtGetHistory.all(m.id);
+          for (const h of hist) {
+            totalProbes++;
+            if (h.is_up) totalUp++;
+          }
+        }
+        const fleetUptime = totalProbes > 0 ? (Math.round((totalUp / totalProbes) * 1000) / 10).toFixed(1) : '100';
+        rightText = `${fleetUptime}% UPTIME`;
+        status = Number(fleetUptime) >= 99 ? 'up' : Number(fleetUptime) >= 95 ? 'degraded' : 'down';
+      } else {
+        if (openIncidents === 0) {
+          rightText = `${monitors.length}/${monitors.length} OPERATIONAL`;
+          status = 'up';
+        } else {
+          rightText = `${openIncidents} INCIDENT${openIncidents > 1 ? 'S' : ''}`;
+          status = 'down';
+        }
+      }
+    } else {
+      // Find monitor by ID or name
+      const monitor = db.prepare('SELECT * FROM monitors WHERE LOWER(id) = ? OR LOWER(name) = ? LIMIT 1').get(targetId, targetId);
+      if (monitor) {
+        leftText = customLabel || monitor.name;
+        const historyDesc = stmtGetHistory.all(monitor.id);
+        const latest = historyDesc[0]; // most recent probe
+        
+        let upCount = 0;
+        historyDesc.forEach((h) => { if (h.is_up) upCount++; });
+        const uptime24h = historyDesc.length > 0 ? (Math.round((upCount / historyDesc.length) * 1000) / 10).toFixed(1) : '100';
+        const latencyMs = latest?.latency_ms || 0;
+
+        let currentStatus = 'up';
+        if (latest) {
+          if (!latest.is_up) currentStatus = 'down';
+          else if (latest.latency_ms > 450) currentStatus = 'degraded';
+        }
+
+        if (metric === 'uptime') {
+          rightText = `${uptime24h}% UPTIME`;
+          status = Number(uptime24h) >= 99 ? 'up' : Number(uptime24h) >= 95 ? 'degraded' : 'down';
+        } else if (metric === 'latency') {
+          rightText = `${latencyMs} ms`;
+          status = latencyMs < 200 ? 'up' : latencyMs < 450 ? 'degraded' : 'down';
+        } else {
+          // Status metric
+          if (currentStatus === 'up') {
+            rightText = 'OPERATIONAL';
+            status = 'up';
+          } else if (currentStatus === 'degraded') {
+            rightText = 'DEGRADED';
+            status = 'degraded';
+          } else {
+            rightText = 'OFFLINE';
+            status = 'down';
+          }
+        }
+      } else {
+        leftText = customLabel || targetId;
+        rightText = 'NOT FOUND';
+        status = 'neutral';
+      }
+    }
+
+    const svg = renderSvgBadge({ leftText, rightText, status, showDot });
+    res.writeHead(200, {
+      'Content-Type': 'image/svg+xml; charset=utf-8',
+      'Cache-Control': 'public, max-age=30, s-maxage=30',
+    });
+    if (req.method === 'HEAD') return res.end();
+    res.end(svg);
     return;
   }
 
