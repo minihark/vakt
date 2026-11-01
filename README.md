@@ -1,4 +1,7 @@
 # Vakt (`vakt.apps.harkco.se`) 🛡️📡
+
+[![Harkco Fleet Uptime](https://vakt.apps.harkco.se/badge/fleet.svg?metric=uptime)](https://vakt.apps.harkco.se)
+
 > **Harkco Fleet Uptime & JSON Error Alerting Service**  
 > Lightweight sentinel probing /health on Harkco Daily Apps with millisecond latency sparklines, JSON response inspection, and incident logging.
 

@@ -281,10 +281,22 @@ export const App: React.FC = () => {
       {/* Footer */}
       <footer className="border-t border-[#1A2438] bg-[#080C14] py-6 px-4 sm:px-6 text-xs text-[#64748B] font-mono mt-12">
         <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-4">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-3">
             <span className="font-bold text-white">Vakt</span>
             <span>•</span>
-            <span>Harkco Sentinel Service</span>
+            <a
+              href="https://vakt.apps.harkco.se"
+              title="Harkco Fleet Status Sentinel"
+              className="inline-block hover:opacity-90 transition-opacity"
+            >
+              <img
+                src="https://vakt.apps.harkco.se/badge/fleet.svg"
+                alt="Harkco Fleet: operational"
+                height="20"
+                className="h-5 inline-block"
+                onError={(e) => { e.currentTarget.style.display = 'none'; }}
+              />
+            </a>
             <span>•</span>
             <span className="text-[#10B981]">100% Noll Annonser</span>
           </div>
