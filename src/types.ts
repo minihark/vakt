@@ -19,6 +19,8 @@ export interface Monitor {
   history: ProbeResult[];
   lastCheckedAt: string;
   lastResponseBody: string | null;
+  snoozedUntil?: string | null;
+  acknowledgedAt?: string | null;
 }
 
 export interface Incident {
@@ -32,6 +34,8 @@ export interface Incident {
   startedAt: string;
   resolvedAt: string | null;
   durationSec: number | null;
+  acknowledgedAt?: string | null;
+  acknowledgedBy?: string | null;
 }
 
 export interface FleetStats {

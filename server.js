@@ -64,6 +64,12 @@ db.exec(`
   );
 `);
 
+// Database migrations for Two-Way ACK and Silent Snooze
+try { db.prepare('ALTER TABLE incidents ADD COLUMN acknowledged_at TEXT').run(); } catch {}
+try { db.prepare('ALTER TABLE incidents ADD COLUMN acknowledged_by TEXT').run(); } catch {}
+try { db.prepare('ALTER TABLE monitors ADD COLUMN acknowledged_at TEXT').run(); } catch {}
+try { db.prepare('ALTER TABLE monitors ADD COLUMN snoozed_until TEXT').run(); } catch {}
+
 // Seed default Harkco fleet if empty
 const countRow = db.prepare('SELECT count(*) as count FROM monitors').get();
 if (!countRow || countRow.count === 0) {
@@ -131,6 +137,29 @@ const stmtInsertMonitor = db.prepare(`
 `);
 const stmtDeleteMonitor = db.prepare('DELETE FROM monitors WHERE id = ?');
 const stmtDeleteMonitorHistory = db.prepare('DELETE FROM probe_history WHERE monitor_id = ?');
+const stmtGetMonitorById = db.prepare('SELECT * FROM monitors WHERE id = ?');
+
+// Two-Way ACK & Silent Snooze Statements
+const stmtAckIncident = db.prepare(`
+  UPDATE incidents
+  SET acknowledged_at = ?, acknowledged_by = ?
+  WHERE monitor_id = ? AND resolved_at IS NULL
+`);
+const stmtAckMonitor = db.prepare(`
+  UPDATE monitors
+  SET acknowledged_at = ?
+  WHERE id = ?
+`);
+const stmtSnoozeMonitor = db.prepare(`
+  UPDATE monitors
+  SET snoozed_until = ?
+  WHERE id = ?
+`);
+const stmtUnsnoozeMonitor = db.prepare(`
+  UPDATE monitors
+  SET snoozed_until = NULL, acknowledged_at = NULL
+  WHERE id = ?
+`);
 
 // Alerting Prepared Statements
 const stmtGetAllSettings = db.prepare('SELECT key, value FROM alert_settings');
@@ -273,7 +302,25 @@ async function dispatchAlert(event, data) {
   const timestamp = new Date().toISOString();
   const results = [];
 
-  if (event === 'incident_opened' && !settings.notifyOnDown) return results;
+  if (event === 'incident_opened') {
+    if (!settings.notifyOnDown) return results;
+
+    const monitorId = data.monitor?.id || data.monitorId;
+    if (monitorId) {
+      const monRow = stmtGetMonitorById.get(monitorId);
+      if (monRow && monRow.snoozed_until) {
+        const snoozeEnd = new Date(monRow.snoozed_until).getTime();
+        if (snoozeEnd > Date.now()) {
+          const remainingMin = Math.max(1, Math.round((snoozeEnd - Date.now()) / 60000));
+          console.log(`[Vakt Alert] Alert silenced for ${data.monitor?.name || monitorId}: Snoozed for ${remainingMin}m more (until ${monRow.snoozed_until}).`);
+          const logId = `al-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+          stmtInsertAlertLog.run(logId, 'alert_silenced_snooze', data.monitor?.name || monitorId, 'telegram', 'silenced', `Tystad i ytterligare ${remainingMin}m (till ${monRow.snoozed_until})`, timestamp);
+          return results;
+        }
+      }
+    }
+  }
+
   if (event === 'incident_resolved' && !settings.notifyOnRecovery) return results;
 
   const monitorName = data.monitor?.name || data.monitorName || 'Harkco Service';
@@ -377,6 +424,8 @@ async function dispatchAlert(event, data) {
   // 3. Dispatch Telegram via Bot API
   if (settings.notifyTelegram && settings.telegramBotToken && settings.telegramChatId) {
     try {
+      const monitorId = data.monitor?.id || data.monitorId || (event === 'test' ? 'hub' : '');
+
       let telegramText = '';
       if (event === 'incident_opened') {
         telegramText =
@@ -389,19 +438,36 @@ async function dispatchAlert(event, data) {
             ? `<b>Fel-payload (JSON):</b>\n<pre>${escapeHtml(data.errorPayload.slice(0, 500))}</pre>`
             : `<i>${escapeHtml(data.errorMsg || 'HTTP-anrop misslyckades')}</i>`);
       } else if (event === 'incident_resolved') {
+        const ackNote = data.acknowledgedBy
+          ? `\n🛡️ <i>Tidigare kvitterad av ${escapeHtml(data.acknowledgedBy)}.</i>`
+          : '';
         telegramText =
           `✅ <b>[VAKT LÖST] ${escapeHtml(monitorName)} är ÅTERSTÄLLD</b>\n\n` +
           `🔗 <b>URL:</b> <code>${escapeHtml(monitorUrl)}</code>\n` +
           `⏱ <b>Total driftstörning:</b> <b>${data.durationSec || 0} sekunder</b>\n` +
-          `⚡ <b>Svarstid nu:</b> <code>HTTP 200 (${data.latencyMs || 0} ms)</code>\n` +
+          `⚡ <b>Svarstid nu:</b> <code>HTTP 200 (${data.latencyMs || 0} ms)</code>${ackNote}\n` +
           `🛡️ <i>Flottan är åter i normal drift.</i>`;
       } else {
         telegramText =
           `🛡️ <b>[VAKT TEST] Flottans väktare är aktiv</b>\n\n` +
-          `Alla 11 Harkco Daily Apps övervakas med 45s radar-svep.\n` +
+          `Alla 12 Harkco Daily Apps övervakas med 45s radar-svep.\n` +
           `⚡ Latens: <code>${data.latencyMs || 18} ms</code>\n` +
-          `✅ Telegram-avisering fungerar optimalt!`;
+          `✅ Telegram-avisering med tvåvägs kvittering & snooze är aktiv!\n\n` +
+          `<i>Tryck på knapparna nedan för att testa tvåvägskvittering & snooze:</i>`;
       }
+
+      // Two-Way Interactive Inline Keyboard
+      const inlineKeyboard = [];
+      if (monitorId && (event === 'incident_opened' || event === 'test')) {
+        inlineKeyboard.push([
+          { text: '✅ Kvittera (ACK)', callback_data: `vakt_ack:${monitorId}` },
+          { text: '🔕 Tysta 30m', callback_data: `vakt_snooze:30:${monitorId}` },
+        ]);
+      }
+      inlineKeyboard.push([
+        { text: '🌐 Öppna Vakt', url: 'https://vakt.apps.harkco.se' },
+        ...(monitorUrl && monitorUrl !== 'https://vakt.apps.harkco.se' ? [{ text: '🔗 Öppna App', url: monitorUrl }] : []),
+      ]);
 
       const tgUrl = `https://api.telegram.org/bot${settings.telegramBotToken}/sendMessage`;
       const res = await fetch(tgUrl, {
@@ -412,6 +478,7 @@ async function dispatchAlert(event, data) {
           text: telegramText,
           parse_mode: 'HTML',
           disable_web_page_preview: true,
+          reply_markup: { inline_keyboard: inlineKeyboard },
         }),
         signal: AbortSignal.timeout(6000),
       });
@@ -776,12 +843,14 @@ async function probeSingleMonitor(monitor) {
     if (openIncident) {
       const durationSec = Math.max(1, Math.round((new Date(checkedAt).getTime() - new Date(openIncident.started_at).getTime()) / 1000));
       stmtResolveIncident.run(checkedAt, durationSec, openIncident.id);
+      stmtUnsnoozeMonitor.run(monitor.id);
       console.log(`[Vakt] INCIDENT RESOLVED: ${monitor.name} recovered after ${durationSec}s`);
       dispatchAlert('incident_resolved', {
         monitor,
         statusCode: 200,
         latencyMs,
         durationSec,
+        acknowledgedBy: openIncident.acknowledged_by,
       }).catch((e) => console.error('[Vakt Alert Dispatch Failed]:', e));
     }
   }
@@ -1046,6 +1115,8 @@ const server = http.createServer(async (req, res) => {
         history,
         lastCheckedAt: latest?.checked_at || m.created_at,
         lastResponseBody: latest?.response_body || null,
+        snoozedUntil: m.snoozed_until || null,
+        acknowledgedAt: m.acknowledged_at || null,
       };
     });
 
@@ -1081,6 +1152,8 @@ const server = http.createServer(async (req, res) => {
       startedAt: inc.started_at,
       resolvedAt: inc.resolved_at,
       durationSec: inc.duration_sec,
+      acknowledgedAt: inc.acknowledged_at || null,
+      acknowledgedBy: inc.acknowledged_by || null,
     }));
 
     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -1260,6 +1333,7 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'POST' && pathname === '/api/alerts/test') {
     try {
       const results = await dispatchAlert('test', {
+        monitorId: 'hub',
         monitorName: 'Harkco Suite Test',
         url: 'https://vakt.apps.harkco.se',
         statusCode: 200,
@@ -1267,6 +1341,126 @@ const server = http.createServer(async (req, res) => {
       });
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ status: 'ok', results }));
+    } catch (err) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: err.message }));
+    }
+    return;
+  }
+
+  // POST /api/alerts/ack (Two-way incident acknowledgment)
+  if (req.method === 'POST' && pathname === '/api/alerts/ack') {
+    try {
+      const body = await readJsonBody(req);
+      const monitorId = (body.monitorId || '').trim();
+      const author = (body.author || 'Viktor').trim();
+
+      if (!monitorId) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'monitorId is required' }));
+        return;
+      }
+
+      const monitor = stmtGetMonitorById.get(monitorId) || { id: monitorId, name: monitorId };
+      const now = new Date().toISOString();
+
+      stmtAckIncident.run(now, author, monitorId);
+      stmtAckMonitor.run(now, monitorId);
+
+      const logId = `al-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+      stmtInsertAlertLog.run(logId, 'incident_acknowledged', monitor.name, 'telegram', 'delivered', `Kvitterad av ${author}`, now);
+
+      console.log(`[Vakt Alert] Incident for ${monitor.name} (${monitorId}) ACKNOWLEDGED by ${author}`);
+
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        ok: true,
+        status: 'acknowledged',
+        monitorId,
+        monitorName: monitor.name,
+        acknowledgedBy: author,
+        acknowledgedAt: now,
+      }));
+    } catch (err) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: err.message }));
+    }
+    return;
+  }
+
+  // POST /api/alerts/snooze (Two-way silent snooze)
+  if (req.method === 'POST' && pathname === '/api/alerts/snooze') {
+    try {
+      const body = await readJsonBody(req);
+      const monitorId = (body.monitorId || '').trim();
+      const durationMinutes = parseInt(body.durationMinutes, 10) || 30;
+      const author = (body.author || 'Viktor').trim();
+
+      if (!monitorId) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'monitorId is required' }));
+        return;
+      }
+
+      const monitor = stmtGetMonitorById.get(monitorId) || { id: monitorId, name: monitorId };
+      const now = new Date().toISOString();
+      const snoozedUntil = new Date(Date.now() + durationMinutes * 60 * 1000).toISOString();
+
+      stmtSnoozeMonitor.run(snoozedUntil, monitorId);
+
+      const logId = `al-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+      stmtInsertAlertLog.run(logId, 'alert_snoozed', monitor.name, 'telegram', 'delivered', `Tystad i ${durationMinutes}m av ${author} till ${snoozedUntil}`, now);
+
+      console.log(`[Vakt Alert] Alerts for ${monitor.name} (${monitorId}) SNOOZED for ${durationMinutes}m by ${author} until ${snoozedUntil}`);
+
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        ok: true,
+        status: 'snoozed',
+        monitorId,
+        monitorName: monitor.name,
+        durationMinutes,
+        snoozedUntil,
+        snoozedBy: author,
+        timestamp: now,
+      }));
+    } catch (err) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: err.message }));
+    }
+    return;
+  }
+
+  // POST /api/alerts/unsnooze (Resume alerts)
+  if (req.method === 'POST' && pathname === '/api/alerts/unsnooze') {
+    try {
+      const body = await readJsonBody(req);
+      const monitorId = (body.monitorId || '').trim();
+
+      if (!monitorId) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'monitorId is required' }));
+        return;
+      }
+
+      const monitor = stmtGetMonitorById.get(monitorId) || { id: monitorId, name: monitorId };
+      const now = new Date().toISOString();
+
+      stmtUnsnoozeMonitor.run(monitorId);
+
+      const logId = `al-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+      stmtInsertAlertLog.run(logId, 'alert_unsnoozed', monitor.name, 'telegram', 'delivered', 'Larm återaktiverat', now);
+
+      console.log(`[Vakt Alert] Alerts for ${monitor.name} (${monitorId}) UNSNOOZED`);
+
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        ok: true,
+        status: 'unsnoozed',
+        monitorId,
+        monitorName: monitor.name,
+        timestamp: now,
+      }));
     } catch (err) {
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: err.message }));

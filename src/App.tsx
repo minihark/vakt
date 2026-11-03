@@ -229,6 +229,11 @@ export const App: React.FC = () => {
 
                   <div className="flex items-center gap-3 text-[11px] text-[#64748B]">
                     <span>{new Date(inc.startedAt).toLocaleTimeString('sv-SE')}</span>
+                    {inc.acknowledgedAt && (
+                      <span className="text-[#38BDF8] font-mono text-[10px] bg-sky-950/40 border border-sky-800/40 px-1.5 py-0.5 rounded">
+                        ✓ Kvitterad ({inc.acknowledgedBy || 'Viktor'})
+                      </span>
+                    )}
                     {inc.resolvedAt ? (
                       <span className="text-[#10B981] font-bold">Löst efter {inc.durationSec}s</span>
                     ) : (

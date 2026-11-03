@@ -38,6 +38,11 @@ export const MonitorCard: React.FC<MonitorCardProps> = ({
             <span className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold border uppercase ${statusBg}`}>
               {isUp ? `${monitor.expectedStatus} OK` : isDegraded ? 'LÅNGSAM' : 'OFFLINE'}
             </span>
+            {monitor.snoozedUntil && new Date(monitor.snoozedUntil).getTime() > Date.now() && (
+              <span className="px-1.5 py-0.5 rounded text-[10px] font-mono font-medium border bg-amber-500/10 text-amber-400 border-amber-500/30">
+                🔕 Tystad
+              </span>
+            )}
           </div>
 
           <a
