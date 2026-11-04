@@ -1138,6 +1138,27 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // POST /api/probe/:id (Probe single monitor on-demand)
+  const probeMatch = pathname.match(/^\/api\/probe\/([a-zA-Z0-9_-]+)$/);
+  if (req.method === 'POST' && probeMatch) {
+    const monitorId = probeMatch[1];
+    const monitor = stmtGetMonitorById.get(monitorId);
+    if (!monitor) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: `Monitor ${monitorId} not found` }));
+      return;
+    }
+    try {
+      const probeRes = await probeSingleMonitor(monitor);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ status: 'ok', monitorId, probeRes }));
+    } catch (err) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: err.message }));
+    }
+    return;
+  }
+
   // GET /api/incidents
   if (req.method === 'GET' && pathname === '/api/incidents') {
     const rawIncidents = stmtGetRecentIncidents.all();
